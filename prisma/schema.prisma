@@ -13,3 +13,92 @@ model AgentRun {
   output    String
   createdAt DateTime @default(now())
 }
+
+model AgentRule {
+  id        String   @id @default(cuid())
+  rule      String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model BotProfile {
+  id          String   @id @default(cuid())
+  name        String
+  sandboxPath String
+  isSetup     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Conversation {
+  id           String        @id @default(cuid())
+  userId       String?
+  user         User?         @relation(fields: [userId], references: [id])
+  title        String?
+  messages     ChatMessage[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([userId])
+}
+
+model ChatMessage {
+  id              String        @id @default(cuid())
+  conversationId  String
+  conversation    Conversation  @relation(fields: [conversationId], references: [id])
+  role            String
+  content         String
+  createdAt       DateTime      @default(now())
+
+  @@index([conversationId])
+}
+
+model User {
+  id            String         @id @default(cuid())
+  name          String?
+  email         String?        @unique
+  provider      String?
+  externalId    String?
+  isOnboarded   Boolean        @default(false)
+  conversations Conversation[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([provider, externalId])
+}
+
+model RunningProcess {
+  id          String   @id @default(cuid())
+  pid         Int?
+  command     String
+  args        String?
+  cwd         String?
+  status      String
+  startedAt   DateTime @default(now())
+  endedAt     DateTime?
+  exitCode    Int?
+  updatedAt   DateTime @updatedAt
+}
+
+model CommandHistory {
+  id          String   @id @default(cuid())
+  command     String
+  args        String?
+  cwd         String?
+  status      String
+  stdout      String?
+  stderr      String?
+  exitCode    Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Script {
+  id             String   @id @default(cuid())
+  path           String
+  expectedParams String?
+  description    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
