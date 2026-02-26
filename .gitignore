@@ -1,0 +1,25 @@
+# Environment
+.env
+.env.*
+
+# Node
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+
+# Build
+/dist
+/build
+
+# Prisma
+/prisma/migrations
+
+# Misc
+*.tsbuildinfo
