@@ -52,6 +52,7 @@ export async function buildContext(
     getScripts(prisma),
     getRunningProcesses(prisma),
   ]);
+  const downloadedSoftware = await getTopDownloadedSoftware(prisma);
 
   const contextText = buildContextText({
     botProfile,
@@ -60,6 +61,7 @@ export async function buildContext(
     commandHistory,
     scripts,
     runningProcesses,
+    downloadedSoftware,
   });
 
   return {
@@ -222,6 +224,7 @@ function buildContextText(input: {
   commandHistory: unknown[];
   scripts: unknown[];
   runningProcesses: unknown[];
+  downloadedSoftware: unknown[];
 }) {
   const sections: string[] = [];
 
@@ -265,9 +268,26 @@ function buildContextText(input: {
   sections.push(`Running processes: ${JSON.stringify(input.runningProcesses)}`);
   sections.push(`Recent commands: ${JSON.stringify(input.commandHistory)}`);
   sections.push(`Scripts: ${JSON.stringify(input.scripts)}`);
+  sections.push(`Downloaded software: ${JSON.stringify(input.downloadedSoftware)}`);
 
   const toolSummary = toolDefinitions.map((tool) => tool.function);
   sections.push(`Available tools: ${JSON.stringify(toolSummary)}`);
 
   return sections.join("\n");
+}
+
+async function getTopDownloadedSoftware(prisma: PrismaClient) {
+  return prisma.downloadedSoftware.findMany({
+    orderBy: [{ usedCount: "desc" }, { lastUsedAt: "desc" }],
+    take: 20,
+    select: {
+      id: true,
+      name: true,
+      version: true,
+      installPath: true,
+      usedCount: true,
+      lastUsedAt: true,
+      updatedAt: true,
+    },
+  });
 }

@@ -1,4 +1,7 @@
 import { exec, execFile } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { promisify } from "node:util";
 
@@ -116,6 +119,24 @@ export const toolDefinitions = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "delete_downloaded_software",
+      description: "Delete a downloaded software entry by id.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "string",
+            description: "Downloaded software id to delete.",
+          },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
 ] as const;
 
 export type ToolName = (typeof toolDefinitions)[number]["function"]["name"];
@@ -144,6 +165,10 @@ export type CompleteUserOnboardingArgs = {
   name: string;
 };
 
+export type DeleteDownloadedSoftwareArgs = {
+  id: string;
+};
+
 export type RunCommandResult = {
   stdout: string;
   stderr: string;
@@ -164,6 +189,8 @@ export async function runToolCall(
       return completeSetup(coerceCompleteSetupArgs(args), options);
     case "complete_user_onboarding":
       return completeUserOnboarding(coerceCompleteUserOnboardingArgs(args), options);
+    case "delete_downloaded_software":
+      return deleteDownloadedSoftware(coerceDeleteDownloadedSoftwareArgs(args), options);
     default:
       throw new Error(`Unknown tool name: ${name}`);
   }
@@ -251,6 +278,19 @@ function coerceCompleteUserOnboardingArgs(value: unknown): CompleteUserOnboardin
     userId: args.userId,
     name: args.name,
   };
+}
+
+function coerceDeleteDownloadedSoftwareArgs(value: unknown): DeleteDownloadedSoftwareArgs {
+  if (!value || typeof value !== "object") {
+    throw new Error("delete_downloaded_software expects an object argument.");
+  }
+
+  const args = value as Partial<DeleteDownloadedSoftwareArgs>;
+  if (!args.id || typeof args.id !== "string") {
+    throw new Error("delete_downloaded_software requires a string 'id'.");
+  }
+
+  return { id: args.id };
 }
 
 async function runCommand(
@@ -388,6 +428,9 @@ async function completeSetup(
     throw new Error("complete_setup requires database access.");
   }
 
+  const resolvedSandboxPath = expandHomePath(sandboxPath);
+  await mkdir(resolvedSandboxPath, { recursive: true });
+
   const existing = await options.prisma.botProfile.findFirst({
     orderBy: { createdAt: "asc" },
   });
@@ -397,7 +440,7 @@ async function completeSetup(
       where: { id: existing.id },
       data: {
         name,
-        sandboxPath,
+        sandboxPath: resolvedSandboxPath,
         isSetup: true,
       },
     });
@@ -406,10 +449,20 @@ async function completeSetup(
   return options.prisma.botProfile.create({
     data: {
       name,
-      sandboxPath,
+      sandboxPath: resolvedSandboxPath,
       isSetup: true,
     },
   });
+}
+
+function expandHomePath(inputPath: string) {
+  if (!inputPath.startsWith("~")) {
+    return inputPath;
+  }
+
+  const base = homedir();
+  const remainder = inputPath.slice(1);
+  return resolve(base, remainder);
 }
 
 async function completeUserOnboarding(
@@ -426,5 +479,18 @@ async function completeUserOnboarding(
       name,
       isOnboarded: true,
     },
+  });
+}
+
+async function deleteDownloadedSoftware(
+  { id }: DeleteDownloadedSoftwareArgs,
+  options?: { prisma?: PrismaClient }
+) {
+  if (!options?.prisma) {
+    throw new Error("delete_downloaded_software requires database access.");
+  }
+
+  return options.prisma.downloadedSoftware.delete({
+    where: { id },
   });
 }
