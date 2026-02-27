@@ -6,6 +6,14 @@ export const coreSystemPrompt = [
   "Request confirmation before dangerous actions or actions in key areas.",
 ].join(" ");
 
+export const outputFormatPrompt = [
+  "Output format rules:",
+  "Wrap user-visible content in <message>...</message>.",
+  "Put internal planning or notes in <reasoning>...</reasoning>.",
+  "Include <done/> only when the task is fully complete.",
+  "You may call tools as needed; tool calls do not replace <message> output.",
+].join(" ");
+
 export const setupSystemPrompt = [
   "You are a system administrator setting up this agent instance.",
   "Your job is to gather the bot name and sandbox path from the user.",
@@ -13,7 +21,7 @@ export const setupSystemPrompt = [
   "Ask one question at a time.",
   "First ask for the bot name and suggest the default: \"Agent Z\".",
   "Next ask for the sandbox path and suggest the default: \"~/sandbox\".",
-  "When you have both values, call the setup tool to create the sandbox (mkdir if needed), store them, and mark setup complete.",
+  "When you have both values, call the setup tool to create the sandbox (mkdir if needed), create scripts/ and skills/ subdirectories, store them, and mark setup complete.",
 ].join(" ");
 
 export const onboardingSystemPrompt = [

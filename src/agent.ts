@@ -1,8 +1,14 @@
 import OpenAI from "openai";
 import { PrismaClient } from "@prisma/client";
-import { runToolCall, toolDefinitions } from "./tools";
-import { coreSystemPrompt, onboardingSystemPrompt, setupSystemPrompt } from "./systemPrompt";
+import { runToolCall, toolDefinitions, ToolName } from "./tools";
+import {
+  coreSystemPrompt,
+  onboardingSystemPrompt,
+  outputFormatPrompt,
+  setupSystemPrompt,
+} from "./systemPrompt";
 import { Message } from "./context";
+import { appendTaskNote, appendToolOutput } from "./taskContext";
 
 type ToolCallItem = {
   type: "function_call";
@@ -37,6 +43,9 @@ export type AgentConfig = {
     isOnboarded: boolean;
   } | null;
   maxToolCalls?: number;
+  maxSteps?: number;
+  maxRetries?: number;
+  conversationId?: string;
 };
 
 export async function runAgent(
@@ -51,6 +60,9 @@ export async function runAgent(
     botProfile,
     user,
     maxToolCalls = 4,
+    maxSteps = 6,
+    maxRetries = 1,
+    conversationId,
   }: AgentConfig
 ): Promise<string> {
   const resolvedSystemPrompt =
@@ -61,40 +73,95 @@ export async function runAgent(
         ? onboardingSystemPrompt
         : coreSystemPrompt);
 
-  const inputMessages: OpenAI.Responses.ResponseInputItem[] = [
-    {
-      role: "system",
-      content: resolvedSystemPrompt,
-    },
-  ];
+  const corePathsPrompt =
+    botProfile?.sandboxPath && botProfile.isSetup
+      ? [
+          "Sandbox directories:",
+          `Root: ${botProfile.sandboxPath}`,
+          `Scripts: ${botProfile.sandboxPath}/scripts`,
+          `Skills: ${botProfile.sandboxPath}/skills`,
+        ].join(" ")
+      : undefined;
 
-  if (contextText) {
-    inputMessages.push({ role: "system", content: `Context:\\n${contextText}` });
-  }
+  const baseInput = buildInputMessages({
+    systemPrompt: resolvedSystemPrompt,
+    contextText,
+    messages,
+    input,
+    extraSystem: corePathsPrompt
+      ? `${outputFormatPrompt} ${corePathsPrompt}`
+      : outputFormatPrompt,
+  });
 
-  if (messages && messages.length > 0) {
-    inputMessages.push(...messages);
-  } else {
-    inputMessages.push({ role: "user", content: input });
-  }
-
-  const response = await openai.responses.create({
+  let current = await openai.responses.create({
     model,
-    input: inputMessages,
+    input: baseInput,
     tools: toolDefinitions,
   });
 
-  return handleToolLoop(openai, response, { model, maxToolCalls, prisma });
+  let outputText = await resolveToolLoop(openai, current, {
+    model,
+    maxToolCalls,
+    prisma,
+    conversationId,
+    maxRetries,
+  });
+
+  let collected = collectTaggedMessages(outputText);
+  if (collected.reasoning && conversationId) {
+    appendTaskNote(conversationId, collected.reasoning);
+  }
+
+  for (let step = 0; step < maxSteps; step += 1) {
+    if (hasDoneTag(outputText)) {
+      return collected.message || outputText;
+    }
+
+    current = await openai.responses.create({
+      model,
+      tools: toolDefinitions,
+      previous_response_id: current.id,
+      input: [{ role: "user", content: "continue" }],
+    });
+
+    outputText = await resolveToolLoop(openai, current, {
+      model,
+      maxToolCalls,
+      prisma,
+      conversationId,
+      maxRetries,
+    });
+
+    const next = collectTaggedMessages(outputText);
+    if (next.message) {
+      collected.message = collected.message
+        ? `${collected.message}\n${next.message}`
+        : next.message;
+    }
+    if (next.reasoning && conversationId) {
+      appendTaskNote(conversationId, next.reasoning);
+    }
+  }
+
+  return collected.message || outputText;
 }
 
-async function handleToolLoop(
+async function resolveToolLoop(
   openai: OpenAI,
   response: OpenAI.Responses.Response,
   {
     model,
     maxToolCalls,
     prisma,
-  }: { model: string; maxToolCalls: number; prisma?: PrismaClient }
+    conversationId,
+    maxRetries,
+  }: {
+    model: string;
+    maxToolCalls: number;
+    prisma?: PrismaClient;
+    conversationId?: string;
+    maxRetries: number;
+  }
 ): Promise<string> {
   let current = response;
 
@@ -107,9 +174,15 @@ async function handleToolLoop(
     const toolOutputs = await Promise.all(
       toolCalls.map(async (call) => {
         const args = safeParseJson(call.arguments ?? "{}");
-        const result = await runToolCall(call.name as "run_command", args, {
+        const result = await runToolCall(call.name as ToolName, args, {
           prisma,
         });
+        if (conversationId) {
+          appendToolOutput(
+            conversationId,
+            summarizeToolResult(call.name, args, result, maxRetries)
+          );
+        }
 
         return {
           type: "function_call_output",
@@ -140,4 +213,91 @@ function safeParseJson(value: string): unknown {
   } catch {
     return {};
   }
+}
+
+function buildInputMessages(input: {
+  systemPrompt: string;
+  contextText?: string;
+  messages?: Message[];
+  input: string;
+  extraSystem?: string;
+}) {
+  const items: OpenAI.Responses.ResponseInputItem[] = [
+    {
+      role: "system",
+      content: input.systemPrompt,
+    },
+  ];
+
+  if (input.extraSystem) {
+    items.push({ role: "system", content: input.extraSystem });
+  }
+
+  if (input.contextText) {
+    items.push({ role: "system", content: `Context:\n${input.contextText}` });
+  }
+
+  if (input.messages && input.messages.length > 0) {
+    items.push(...input.messages);
+  } else {
+    items.push({ role: "user", content: input.input });
+  }
+
+  return items;
+}
+
+function summarizeToolResult(
+  name: string,
+  args: unknown,
+  result: unknown,
+  maxRetries: number
+) {
+  const argsText = truncate(JSON.stringify(args), 800);
+  const resultText = truncate(JSON.stringify(result), 2000);
+  return `Tool ${name} args=${argsText} result=${resultText} maxRetries=${maxRetries}`;
+}
+
+function truncate(value: string, max: number) {
+  if (value.length <= max) {
+    return value;
+  }
+  return `${value.slice(0, max)}…`;
+}
+
+function collectTaggedMessages(text: string) {
+  const messageTags = extractTag(text, "message");
+  const reasoningTags = extractTag(text, "reasoning");
+  const message = messageTags.join("\n").trim();
+  const reasoning = reasoningTags.join("\n").trim();
+
+  if (message) {
+    return { message, reasoning };
+  }
+
+  const fallback = stripTags(text, ["reasoning", "done"]).trim();
+  return { message: fallback, reasoning };
+}
+
+function extractTag(text: string, tag: string) {
+  const regex = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "g");
+  const results: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    results.push(match[1].trim());
+  }
+  return results;
+}
+
+function hasDoneTag(text: string) {
+  return /<done\s*\/?>/i.test(text) || /<done>[\s\S]*?<\/done>/i.test(text);
+}
+
+function stripTags(text: string, tags: string[]) {
+  let output = text;
+  for (const tag of tags) {
+    const openClose = new RegExp(`<${tag}>[\\s\\S]*?<\\/${tag}>`, "gi");
+    const selfClosing = new RegExp(`<${tag}\\s*\\/?>`, "gi");
+    output = output.replace(openClose, "").replace(selfClosing, "");
+  }
+  return output;
 }

@@ -4,11 +4,15 @@ import OpenAI from "openai";
 import { PrismaClient } from "@prisma/client";
 import { runAgent } from "./agent";
 import { buildContext, getOrCreateConversation, getOrCreateUser } from "./context";
+import { getTaskContext } from "./taskContext";
 
 const port = Number(process.env.PORT ?? 3000);
 const openaiModel = process.env.OPENAI_MODEL ?? "gpt-5";
 const telegramWebhookPath = process.env.TELEGRAM_WEBHOOK_PATH;
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+const agentMaxToolCalls = Number(process.env.AGENT_MAX_TOOL_CALLS ?? 6);
+const agentMaxSteps = Number(process.env.AGENT_MAX_STEPS ?? 6);
+const agentMaxRetries = Number(process.env.AGENT_MAX_RETRIES ?? 1);
 
 if (!process.env.OPENAI_API_KEY) {
   throw new Error("Missing OPENAI_API_KEY in environment.");
@@ -54,13 +58,22 @@ app.post("/agent", async (req: Request, res: Response, next: NextFunction) => {
       userId: conversation.userId ?? userId,
     });
 
+    const taskContext = getTaskContext(conversation.id);
+    const contextText = taskContext
+      ? `${context.contextText}\nTask context:\n${taskContext}`
+      : context.contextText;
+
     const outputText = await runAgent(openai, input, {
       model: openaiModel,
-      contextText: context.contextText,
+      contextText,
       messages: context.messages,
       prisma,
       botProfile: context.botProfile ?? null,
       user: context.user ?? null,
+      conversationId: conversation.id,
+      maxToolCalls: agentMaxToolCalls,
+      maxSteps: agentMaxSteps,
+      maxRetries: agentMaxRetries,
     });
 
     await prisma.chatMessage.create({
@@ -128,13 +141,22 @@ if (telegramWebhookPath) {
         userId: user?.id,
       });
 
+      const taskContext = getTaskContext(conversation.id);
+      const contextText = taskContext
+        ? `${context.contextText}\nTask context:\n${taskContext}`
+        : context.contextText;
+
       const outputText = await runAgent(openai, messageText, {
         model: openaiModel,
-        contextText: context.contextText,
+        contextText,
         messages: context.messages,
         prisma,
         botProfile: context.botProfile ?? null,
         user: context.user ?? null,
+        conversationId: conversation.id,
+        maxToolCalls: agentMaxToolCalls,
+        maxSteps: agentMaxSteps,
+        maxRetries: agentMaxRetries,
       });
 
       await prisma.chatMessage.create({

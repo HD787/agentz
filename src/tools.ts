@@ -430,6 +430,8 @@ async function completeSetup(
 
   const resolvedSandboxPath = expandHomePath(sandboxPath);
   await mkdir(resolvedSandboxPath, { recursive: true });
+  await mkdir(resolve(resolvedSandboxPath, "scripts"), { recursive: true });
+  await mkdir(resolve(resolvedSandboxPath, "skills"), { recursive: true });
 
   const existing = await options.prisma.botProfile.findFirst({
     orderBy: { createdAt: "asc" },
