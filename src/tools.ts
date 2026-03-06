@@ -428,10 +428,31 @@ async function completeSetup(
     throw new Error("complete_setup requires database access.");
   }
 
-  const resolvedSandboxPath = expandHomePath(sandboxPath);
-  await mkdir(resolvedSandboxPath, { recursive: true });
-  await mkdir(resolve(resolvedSandboxPath, "scripts"), { recursive: true });
-  await mkdir(resolve(resolvedSandboxPath, "skills"), { recursive: true });
+  const preferredSandboxPath = expandHomePath(sandboxPath);
+  const fallbackHomeSandboxPath = resolve(homedir(), "sandbox");
+  const fallbackTmpSandboxPath = "/tmp/agentz-sandbox";
+  const candidatePaths = Array.from(
+    new Set([preferredSandboxPath, fallbackHomeSandboxPath, fallbackTmpSandboxPath])
+  );
+
+  let resolvedSandboxPath: string | null = null;
+  let lastError: unknown;
+  for (const candidatePath of candidatePaths) {
+    try {
+      await mkdir(candidatePath, { recursive: true });
+      await mkdir(resolve(candidatePath, "scripts"), { recursive: true });
+      await mkdir(resolve(candidatePath, "skills"), { recursive: true });
+      resolvedSandboxPath = candidatePath;
+      break;
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
+  }
+
+  if (!resolvedSandboxPath) {
+    throw lastError ?? new Error("Unable to initialize sandbox path.");
+  }
 
   const existing = await options.prisma.botProfile.findFirst({
     orderBy: { createdAt: "asc" },

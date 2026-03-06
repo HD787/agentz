@@ -2,9 +2,9 @@ import "dotenv/config";
 import express, { NextFunction, Request, Response } from "express";
 import OpenAI from "openai";
 import { PrismaClient } from "@prisma/client";
-import { runAgent } from "./agent";
-import { buildContext, getOrCreateConversation, getOrCreateUser } from "./context";
-import { getTaskContext } from "./taskContext";
+import { runAgent } from "./agent.js";
+import { buildContext, getOrCreateConversation, getOrCreateUser } from "./context.js";
+import { getTaskContext } from "./taskContext.js";
 
 const port = Number(process.env.PORT ?? 3000);
 const openaiModel = process.env.OPENAI_MODEL ?? "gpt-5";
@@ -24,9 +24,18 @@ const prisma = new PrismaClient();
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-app.get("/health", (_req, res) => {
+const healthHandler = (req: Request, res: Response) => {
+  console.log("[health] check", {
+    path: req.originalUrl,
+    ip: req.ip,
+  });
   res.json({ ok: true });
-});
+};
+
+app.get("/health", healthHandler);
+app.get("/healthz", healthHandler);
+app.get("/agentz/health", healthHandler);
+app.get("/agentz/healthz", healthHandler);
 
 app.post("/agent", async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -98,16 +107,47 @@ app.post("/agent", async (req: Request, res: Response, next: NextFunction) => {
 });
 
 if (telegramWebhookPath) {
-  app.post(telegramWebhookPath, async (req: Request, res: Response, next: NextFunction) => {
+  const normalizedWebhookPath = telegramWebhookPath.startsWith("/")
+    ? telegramWebhookPath
+    : `/${telegramWebhookPath}`;
+  const prefixedWebhookPath = normalizedWebhookPath.startsWith("/agentz/")
+    ? normalizedWebhookPath
+    : `/agentz${normalizedWebhookPath}`;
+  const webhookRoutes = Array.from(new Set([normalizedWebhookPath, prefixedWebhookPath]));
+
+  const telegramWebhookHandler = async (req: Request, res: Response, next: NextFunction) => {
     try {
       const update = req.body;
-      const messageText =
-        typeof update?.message?.text === "string" ? update.message.text.trim() : "";
+      const updateId =
+        typeof update?.update_id === "number" ? update.update_id : undefined;
+      const hasMessage = Boolean(update?.message);
+      const messageType = hasMessage ? Object.keys(update.message ?? {}) : [];
       const chatId = update?.message?.chat?.id;
       const username =
         typeof update?.message?.from?.username === "string"
           ? update.message.from.username
           : undefined;
+
+      // Log immediately so delivery can be confirmed even when payload parsing fails later.
+      console.log("[telegram] webhook received", {
+        path: telegramWebhookPath,
+        updateId,
+        hasMessage,
+        messageType,
+        chatId,
+        username,
+      });
+
+      const messageText =
+        typeof update?.message?.text === "string" ? update.message.text.trim() : "";
+
+      if (messageText) {
+        console.log("[telegram] incoming message", {
+          chatId,
+          username,
+          text: messageText,
+        });
+      }
 
       if (!messageText) {
         res.json({ ok: true });
@@ -179,7 +219,11 @@ if (telegramWebhookPath) {
     } catch (err) {
       next(err);
     }
-  });
+  };
+
+  for (const route of webhookRoutes) {
+    app.post(route, telegramWebhookHandler);
+  }
 }
 
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -191,6 +235,16 @@ async function start() {
   await prisma.$connect();
   app.listen(port, () => {
     console.log(`Server listening on http://localhost:${port}`);
+    if (telegramWebhookPath) {
+      const normalizedWebhookPath = telegramWebhookPath.startsWith("/")
+        ? telegramWebhookPath
+        : `/${telegramWebhookPath}`;
+      const prefixedWebhookPath = normalizedWebhookPath.startsWith("/agentz/")
+        ? normalizedWebhookPath
+        : `/agentz${normalizedWebhookPath}`;
+      const webhookRoutes = Array.from(new Set([normalizedWebhookPath, prefixedWebhookPath]));
+      console.log("[telegram] webhook route(s) enabled", webhookRoutes);
+    }
   });
 }
 

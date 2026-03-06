@@ -1,5 +1,5 @@
 import { PrismaClient } from "@prisma/client";
-import { toolDefinitions } from "./tools";
+import { toolDefinitions } from "./tools.js";
 
 export type MessageRole = "system" | "user" | "assistant";
 
@@ -270,7 +270,9 @@ function buildContextText(input: {
   sections.push(`Scripts: ${JSON.stringify(input.scripts)}`);
   sections.push(`Downloaded software: ${JSON.stringify(input.downloadedSoftware)}`);
 
-  const toolSummary = toolDefinitions.map((tool) => tool.function);
+  const toolSummary = toolDefinitions.map(
+    (tool: (typeof toolDefinitions)[number]) => tool.function
+  );
   sections.push(`Available tools: ${JSON.stringify(toolSummary)}`);
 
   return sections.join("\n");

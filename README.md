@@ -13,6 +13,9 @@
 
 ## API
 - `GET /health`
+- `GET /healthz`
+- `GET /agentz/health`
+- `GET /agentz/healthz`
 - `POST /agent`
 
 Example request:

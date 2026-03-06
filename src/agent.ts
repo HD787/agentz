@@ -1,20 +1,29 @@
 import OpenAI from "openai";
 import { PrismaClient } from "@prisma/client";
-import { runToolCall, toolDefinitions, ToolName } from "./tools";
+import { runToolCall, toolDefinitions, ToolName } from "./tools.js";
 import {
   coreSystemPrompt,
   onboardingSystemPrompt,
   outputFormatPrompt,
   setupSystemPrompt,
-} from "./systemPrompt";
-import { Message } from "./context";
-import { appendTaskNote, appendToolOutput } from "./taskContext";
+} from "./systemPrompt.js";
+import { Message } from "./context.js";
+import { appendTaskNote, appendToolOutput } from "./taskContext.js";
+
+const responseTools: OpenAI.Responses.Tool[] = toolDefinitions.map((tool) => ({
+  type: "function",
+  name: tool.function.name,
+  description: tool.function.description,
+  parameters: tool.function.parameters,
+  strict: false,
+}));
 
 type ToolCallItem = {
   type: "function_call";
   name: string;
   arguments?: string;
-  call_id: string;
+  call_id?: string;
+  id?: string;
 };
 
 type ResponseOutputItem = ToolCallItem | { type: string };
@@ -23,6 +32,11 @@ type ToolOutputItem = {
   type: "function_call_output";
   call_id: string;
   output: string;
+};
+
+type ResolveToolLoopResult = {
+  response: OpenAI.Responses.Response;
+  outputText: string;
 };
 
 export type AgentConfig = {
@@ -96,16 +110,18 @@ export async function runAgent(
   let current = await openai.responses.create({
     model,
     input: baseInput,
-    tools: toolDefinitions,
+    tools: responseTools,
   });
 
-  let outputText = await resolveToolLoop(openai, current, {
+  let resolved = await resolveToolLoop(openai, current, {
     model,
     maxToolCalls,
     prisma,
     conversationId,
     maxRetries,
   });
+  current = resolved.response;
+  let outputText = resolved.outputText;
 
   let collected = collectTaggedMessages(outputText);
   if (collected.reasoning && conversationId) {
@@ -119,18 +135,20 @@ export async function runAgent(
 
     current = await openai.responses.create({
       model,
-      tools: toolDefinitions,
+      tools: responseTools,
       previous_response_id: current.id,
       input: [{ role: "user", content: "continue" }],
     });
 
-    outputText = await resolveToolLoop(openai, current, {
+    resolved = await resolveToolLoop(openai, current, {
       model,
       maxToolCalls,
       prisma,
       conversationId,
       maxRetries,
     });
+    current = resolved.response;
+    outputText = resolved.outputText;
 
     const next = collectTaggedMessages(outputText);
     if (next.message) {
@@ -162,21 +180,87 @@ async function resolveToolLoop(
     conversationId?: string;
     maxRetries: number;
   }
-): Promise<string> {
+): Promise<ResolveToolLoopResult> {
   let current = response;
 
-  for (let i = 0; i < maxToolCalls; i += 1) {
+  for (let i = 0; ; i += 1) {
     const toolCalls = extractToolCalls(current.output ?? []);
     if (toolCalls.length === 0) {
-      return current.output_text ?? "";
+      return { response: current, outputText: current.output_text ?? "" };
+    }
+
+    if (i >= maxToolCalls) {
+      const forcedOutputs = toolCalls
+        .map((call) => {
+          const callId = getToolCallId(call);
+          if (!callId) {
+            return null;
+          }
+
+          const limitResult = {
+            ok: false,
+            error: `Tool call limit reached (${maxToolCalls}).`,
+            tool: call.name,
+          };
+          if (conversationId) {
+            appendToolOutput(
+              conversationId,
+              summarizeToolResult(call.name, safeParseJson(call.arguments ?? "{}"), limitResult, maxRetries)
+            );
+          }
+
+          return {
+            type: "function_call_output",
+            call_id: callId,
+            output: JSON.stringify(limitResult),
+          } satisfies ToolOutputItem;
+        })
+        .filter((item): item is ToolOutputItem => item !== null);
+
+      if (forcedOutputs.length === 0) {
+        return { response: current, outputText: current.output_text ?? "" };
+      }
+
+      current = await openai.responses.create({
+        model,
+        tools: responseTools,
+        previous_response_id: current.id,
+        input: forcedOutputs,
+      });
+
+      return { response: current, outputText: current.output_text ?? "" };
     }
 
     const toolOutputs = await Promise.all(
       toolCalls.map(async (call) => {
+        const callId = getToolCallId(call);
+        if (!callId) {
+          const missingCallIdResult = {
+            ok: false,
+            error: "Missing tool call id from model response.",
+            tool: call.name,
+          };
+          return {
+            type: "function_call_output",
+            call_id: "",
+            output: JSON.stringify(missingCallIdResult),
+          } satisfies ToolOutputItem;
+        }
+
         const args = safeParseJson(call.arguments ?? "{}");
-        const result = await runToolCall(call.name as ToolName, args, {
-          prisma,
-        });
+        let result: unknown;
+        try {
+          result = await runToolCall(call.name as ToolName, args, {
+            prisma,
+          });
+        } catch (err) {
+          const error = err as Error;
+          result = {
+            ok: false,
+            error: error.message ?? String(err),
+            tool: call.name,
+          };
+        }
         if (conversationId) {
           appendToolOutput(
             conversationId,
@@ -186,21 +270,24 @@ async function resolveToolLoop(
 
         return {
           type: "function_call_output",
-          call_id: call.call_id,
+          call_id: callId,
           output: JSON.stringify(result),
         } satisfies ToolOutputItem;
       })
     );
 
+    const validToolOutputs = toolOutputs.filter((item) => item.call_id);
+    if (validToolOutputs.length === 0) {
+      return { response: current, outputText: current.output_text ?? "" };
+    }
+
     current = await openai.responses.create({
       model,
-      tools: toolDefinitions,
+      tools: responseTools,
       previous_response_id: current.id,
-      input: toolOutputs,
+      input: validToolOutputs,
     });
   }
-
-  return current.output_text ?? "";
 }
 
 function extractToolCalls(items: ResponseOutputItem[]): ToolCallItem[] {
@@ -213,6 +300,16 @@ function safeParseJson(value: string): unknown {
   } catch {
     return {};
   }
+}
+
+function getToolCallId(call: ToolCallItem): string | null {
+  if (typeof call.call_id === "string" && call.call_id.length > 0) {
+    return call.call_id;
+  }
+  if (typeof call.id === "string" && call.id.length > 0) {
+    return call.id;
+  }
+  return null;
 }
 
 function buildInputMessages(input: {
