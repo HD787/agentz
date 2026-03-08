@@ -10,6 +10,7 @@ export const outputFormatPrompt = [
   "Output format rules:",
   "Wrap user-visible content in <message>...</message>.",
   "Put internal planning or notes in <reasoning>...</reasoning>.",
+  "Do not output code in markdown form (no triple backticks); you are communicating through a text message platform.",
   "Include <done/> only when the task is fully complete.",
   "You may call tools as needed; tool calls do not replace <message> output.",
 ].join(" ");
